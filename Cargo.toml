@@ -1,0 +1,61 @@
+[package]
+name = "fabio-claw"
+version = "0.1.0"
+edition = "2021"
+description = "Edge-first embedded LLM runtime for Raspberry Pi and Linux edge boards"
+authors = ["Fabio Lonardoni"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/lonardonifabio/fabio-claw"
+keywords = ["llm", "edge-ai", "embedded", "inference", "raspberry-pi"]
+categories = ["embedded", "network-programming"]
+
+[[bin]]
+name = "fabio-claw"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server
+axum = { version = "0.7", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# LLM inference — high-level bindings to llama.cpp (builds from source, no libclang needed at runtime)
+llama_cpp = "0.3"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Cryptography (device identity)
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+hex = "0.4"
+
+# Logging & tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

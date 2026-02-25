@@ -1,0 +1,8 @@
+{
+  "name": "plugin-calculator",
+  "version": "0.1.0",
+  "description": "Math expression evaluator (e.g. /calc 2^10 - 1)",
+  "commands": ["calc", "calculate", "math"],
+  "default_action": "calculate",
+  "payload_from_args": true
+}

@@ -1,0 +1,8 @@
+{
+  "name": "plugin-datetime",
+  "version": "0.1.0",
+  "description": "Current date, time and timezone",
+  "commands": ["datetime", "time", "date", "now"],
+  "default_action": "now",
+  "payload_from_args": false
+}

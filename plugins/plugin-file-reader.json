@@ -1,0 +1,8 @@
+{
+  "name": "plugin-file-reader",
+  "version": "0.1.0",
+  "description": "Read local files safely (e.g. /file read /home/pi/documents/notes.txt)",
+  "commands": ["file"],
+  "default_action": "read",
+  "payload_from_args": true
+}

@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "plugin-datetime",
+    "plugin-calculator",
+    "plugin-weather",
+    "plugin-file-reader",
+]
+resolver = "2"

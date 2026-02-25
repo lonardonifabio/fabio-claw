@@ -1,0 +1,8 @@
+{
+  "name": "plugin-weather",
+  "version": "0.1.0",
+  "description": "Live weather + 3-day forecast via Open-Meteo (e.g. /weather Milan)",
+  "commands": ["weather", "forecast", "meteo"],
+  "default_action": "weather",
+  "payload_from_args": true
+}
