@@ -220,14 +220,79 @@ pub async fn chat_completions(
 fn extract_command(messages: &[ChatMessage]) -> Option<(String, String)> {
     let last = messages.iter().rev().find(|m| m.role == "user")?;
     let text = last.content.trim();
-    if !text.starts_with('/') { return None; }
-    let without_slash = &text[1..];
-    let mut parts = without_slash.splitn(2, ' ');
-    let cmd  = parts.next().unwrap_or("").to_lowercase();
+
+    // Command can be the full message (`/weather Milano`) or embedded as a token
+    // in natural language (`How is the current /weather Milano`).
+    // We only match command tokens that:
+    // - start with '/'
+    // - are at token boundaries (start-of-text or preceded by whitespace)
+    // - contain [a-zA-Z0-9_-] after '/'
+    let cmd_start = text
+        .char_indices()
+        .find_map(|(idx, ch)| {
+            if ch != '/' {
+                return None;
+            }
+
+            let boundary_ok = idx == 0
+                || text[..idx]
+                    .chars()
+                    .next_back()
+                    .map(|c| c.is_whitespace())
+                    .unwrap_or(true);
+            if !boundary_ok {
+                return None;
+            }
+
+            let next = text[idx + 1..].chars().next();
+            match next {
+                Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '-' => Some(idx),
+                _ => None,
+            }
+        })?;
+
+    let without_slash = &text[cmd_start + 1..];
+    let mut parts = without_slash.splitn(2, char::is_whitespace);
+    let cmd = parts.next().unwrap_or("").to_lowercase();
     let args = parts.next().unwrap_or("").trim().to_string();
-    if cmd.is_empty() { return None; }
+
+    if cmd.is_empty() {
+        return None;
+    }
+
     Some((cmd, args))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_command, ChatMessage};
+
+    fn user(content: &str) -> ChatMessage {
+        ChatMessage { role: "user".into(), content: content.into() }
+    }
+
+    #[test]
+    fn extracts_prefixed_command() {
+        let msgs = vec![user("/weather Milano")];
+        let out = extract_command(&msgs);
+        assert_eq!(out, Some(("weather".into(), "Milano".into())));
+    }
+
+    #[test]
+    fn extracts_embedded_command() {
+        let msgs = vec![user("How is the current /weather Milano")];
+        let out = extract_command(&msgs);
+        assert_eq!(out, Some(("weather".into(), "Milano".into())));
+    }
+
+    #[test]
+    fn does_not_extract_slashes_inside_words() {
+        let msgs = vec![user("check this a/weather path")];
+        let out = extract_command(&msgs);
+        assert_eq!(out, None);
+    }
+}
+
 
 fn format_result(plugin_name: &str, result: &serde_json::Value) -> String {
     match plugin_name {
