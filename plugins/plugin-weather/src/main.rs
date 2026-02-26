@@ -48,13 +48,19 @@ fn main() {
 fn handle(req: PluginRequest) -> PluginResponse {
     match req.action.as_str() {
         "weather" | "forecast" | "current" => {
-            let city = match req.payload.get("city").and_then(|v| v.as_str()) {
-                Some(c) => c.to_string(),
-                None => {
+            // Standardised payload: read "args" first, fall back to legacy "city"
+            let city = req.payload.get("args")
+                .and_then(|v| v.as_str())
+                .or_else(|| req.payload.get("city").and_then(|v| v.as_str()))
+                .map(|s| s.trim().to_string());
+
+            let city = match city {
+                Some(c) if !c.is_empty() => c,
+                _ => {
                     return PluginResponse {
                         success: false,
                         result: Value::Null,
-                        error: Some("Missing 'city' in payload".into()),
+                        error: Some("Missing city name in 'args'".into()),
                     }
                 }
             };
@@ -157,18 +163,18 @@ fn urlencoded(s: &str) -> String {
 
 fn weather_code_to_string(code: u64, is_day: bool) -> &'static str {
     match code {
-        0  => if is_day { "Clear sky ☀️" } else { "Clear sky 🌙" },
-        1  => "Mainly clear 🌤️",
-        2  => "Partly cloudy ⛅",
-        3  => "Overcast ☁️",
-        45 | 48 => "Foggy 🌫️",
-        51 | 53 | 55 => "Drizzle 🌦️",
-        61 | 63 | 65 => "Rain 🌧️",
-        71 | 73 | 75 => "Snow 🌨️",
-        80 | 81 | 82 => "Rain showers 🌦️",
-        85 | 86 => "Snow showers 🌨️",
-        95 => "Thunderstorm ⛈️",
-        96 | 99 => "Thunderstorm with hail ⛈️",
-        _ => "Unknown",
+        0         => if is_day { "Clear sky ☀️" } else { "Clear sky 🌙" },
+        1         => "Mainly clear 🌤️",
+        2         => "Partly cloudy ⛅",
+        3         => "Overcast ☁️",
+        45 | 48   => "Foggy 🌫️",
+        51|53|55  => "Drizzle 🌦️",
+        61|63|65  => "Rain 🌧️",
+        71|73|75  => "Snow 🌨️",
+        80|81|82  => "Rain showers 🌦️",
+        85 | 86   => "Snow showers 🌨️",
+        95        => "Thunderstorm ⛈️",
+        96 | 99   => "Thunderstorm with hail ⛈️",
+        _         => "Unknown",
     }
 }

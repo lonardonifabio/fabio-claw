@@ -30,6 +30,12 @@ pub enum AppError {
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
+    #[error("Scheduler error: {0}")]
+    SchedulerError(String),
+
+    #[error("Telegram error: {0}")]
+    TelegramError(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
@@ -43,11 +49,11 @@ impl axum::response::IntoResponse for AppError {
         use axum::Json;
 
         let (status, message) = match &self {
-            AppError::QueueFull => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
-            AppError::Timeout(_) => (StatusCode::GATEWAY_TIMEOUT, self.to_string()),
+            AppError::QueueFull       => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            AppError::Timeout(_)      => (StatusCode::GATEWAY_TIMEOUT, self.to_string()),
             AppError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            AppError::SecurityError(_) => (StatusCode::FORBIDDEN, self.to_string()),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            AppError::SecurityError(_)  => (StatusCode::FORBIDDEN, self.to_string()),
+            _                           => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
 
         let body = serde_json::json!({

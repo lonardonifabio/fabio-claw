@@ -10,6 +10,11 @@ repository = "https://github.com/lonardonifabio/fabio-claw"
 keywords = ["llm", "edge-ai", "embedded", "inference", "raspberry-pi", "agent"]
 categories = ["embedded", "network-programming"]
 
+# Expose the crate as a library so integration tests can use `fabio_claw::...`
+[lib]
+name = "fabio_claw"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fabio-claw"
 path = "src/main.rs"
@@ -17,7 +22,7 @@ path = "src/main.rs"
 [dependencies]
 # HTTP server
 axum = { version = "0.7", features = ["json"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full"] }   # includes tokio::process — no separate crate needed
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 
@@ -25,7 +30,7 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# LLM inference — high-level bindings to llama.cpp (builds from source, no libclang needed at runtime)
+# LLM inference — high-level bindings to llama.cpp (builds from source)
 llama_cpp = "0.3"
 
 # Database
@@ -50,17 +55,11 @@ uuid = { version = "1", features = ["v4"] }
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
-# Async process (replaces polling with proper async I/O)
-tokio-process = "0.2"
-
 # Scheduler (cron-style persistent tasks)
 cron = "0.12"
 
-# Telegram bot (lightweight polling)
-teloxide = { version = "0.12", features = ["macros"], optional = true }
-
-# HTTP client for Telegram and webhooks
-reqwest = { version = "0.12", features = ["json"], optional = true }
+# HTTP client for Telegram integration
+reqwest = { version = "0.12", features = ["json"] }
 
 # JSON Schema for tool calling
 schemars = "0.8"
@@ -68,14 +67,10 @@ schemars = "0.8"
 # Base64 for signature encoding
 base64 = "0.22"
 
-[features]
-default = []
-telegram = ["teloxide", "reqwest"]
-
 [dev-dependencies]
-reqwest = { version = "0.12", features = ["json"] }
 tokio-test = "0.4"
 axum-test = "0.3"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,22 @@
+{
+  "name": "plugin-calculator",
+  "version": "0.1.0",
+  "description": "Math expression evaluator (e.g. /calc 2^10 - 1)",
+  "commands": ["calc", "calculate", "math"],
+  "default_action": "calculate",
+  "payload_from_args": true,
+  "require_signature": false,
+  "tool_schema": {
+    "description": "Evaluate a mathematical expression and return the numeric result.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "string",
+          "description": "Math expression to evaluate, e.g. '2^10 - 1' or '(3.14 * 5^2)'"
+        }
+      },
+      "required": ["args"]
+    }
+  }
+}
