@@ -1,9 +1,12 @@
+mod agent;
 mod api;
 mod errors;
 mod llm;
 mod memory;
 mod plugins;
+mod scheduler;
 mod security;
+mod telegram;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -47,7 +50,6 @@ impl Config {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,fabio_claw=debug"));
 
@@ -56,21 +58,17 @@ async fn main() {
         .with_target(true)
         .init();
 
-    info!(
-        "🦀 Fabio-Claw v{} starting",
-        env!("CARGO_PKG_VERSION")
-    );
+    info!("🦀 Fabio-Claw v{} starting", env!("CARGO_PKG_VERSION"));
 
     let config = Config::from_env();
 
-    // Load plugin registry from manifests in plugin_dir
-    let plugins = crate::plugins::PluginRegistry::load(&config.plugin_dir);
+    // Plugin registry
+    let plugins = Arc::new(plugins::PluginRegistry::load(&config.plugin_dir));
 
-    // Initialize device identity (generates keypair if first boot)
+    // Device identity
     let identity: Arc<DeviceIdentity> = match DeviceIdentity::load_or_generate(&config.key_path) {
         Ok(id) => {
-            let hex: String = id.public_key_hex();
-            info!(device_id = %hex, "Device identity loaded");
+            info!(device_id = %id.public_key_hex(), "Device identity loaded");
             Arc::new(id)
         }
         Err(e) => {
@@ -79,7 +77,7 @@ async fn main() {
         }
     };
 
-    // Initialize memory store
+    // Memory store
     let memory: Arc<MemoryStore> = match MemoryStore::open(&config.db_path) {
         Ok(m) => Arc::new(m),
         Err(e) => {
@@ -88,7 +86,10 @@ async fn main() {
         }
     };
 
-    // Spawn LLM actor (runs on dedicated OS thread)
+    // Seed default scheduled tasks (won't overwrite existing ones)
+    scheduler::seed_default_tasks(&memory).await;
+
+    // LLM actor
     let llm: Arc<LlmActor> = match LlmActor::spawn(config.model_path.clone()) {
         Ok(actor) => Arc::new(actor),
         Err(e) => {
@@ -98,12 +99,29 @@ async fn main() {
     };
 
     let state = AppState {
-        llm,
-        memory,
-        device:  identity,
-        plugins: std::sync::Arc::new(plugins),
+        llm:     llm.clone(),
+        memory:  memory.clone(),
+        device:  identity.clone(),
+        plugins: plugins.clone(),
     };
 
+    // Start scheduler as background task
+    let sched = Arc::new(scheduler::Scheduler::new(
+        memory.clone(),
+        plugins.clone(),
+        identity.clone(),
+        &config.plugin_dir,
+    ));
+    sched.start();
+
+    // Start Telegram bot if TELEGRAM_TOKEN is set
+    let api_base = format!("http://127.0.0.1:{}", config.port);
+    if let Some(bot) = telegram::from_env(&api_base) {
+        let bot_clone = bot.clone();
+        tokio::spawn(async move { bot_clone.run().await });
+    }
+
+    // HTTP server
     let app = crate::api::router(state).layer(
         tower_http::cors::CorsLayer::permissive(),
     );
@@ -115,12 +133,13 @@ async fn main() {
     info!(addr = %addr, "HTTP server listening");
     info!("OpenAI endpoint:  http://{}/v1/chat/completions", addr);
     info!("Health check:     http://{}/health", addr);
+    info!("Tool definitions: http://{}/v1/tools", addr);
+    info!("Scheduled tasks:  http://{}/v1/tasks", addr);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("Failed to bind TCP listener");
 
-    // Explicit type annotation needed for axum::serve type inference
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -129,7 +148,6 @@ async fn main() {
     info!("Fabio-Claw shutdown complete");
 }
 
-/// Listen for Ctrl-C or SIGTERM for graceful shutdown
 async fn shutdown_signal() {
     use tokio::signal;
 

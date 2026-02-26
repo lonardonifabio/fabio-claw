@@ -1,13 +1,13 @@
 [package]
 name = "fabio-claw"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Edge-first embedded LLM runtime for Raspberry Pi and Linux edge boards"
+description = "Edge-first embedded LLM agent runtime for Raspberry Pi and Linux edge boards"
 authors = ["Fabio Lonardoni"]
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/lonardonifabio/fabio-claw"
-keywords = ["llm", "edge-ai", "embedded", "inference", "raspberry-pi"]
+keywords = ["llm", "edge-ai", "embedded", "inference", "raspberry-pi", "agent"]
 categories = ["embedded", "network-programming"]
 
 [[bin]]
@@ -31,7 +31,7 @@ llama_cpp = "0.3"
 # Database
 rusqlite = { version = "0.31", features = ["bundled"] }
 
-# Cryptography (device identity)
+# Cryptography (device identity + plugin signature verification)
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 hex = "0.4"
@@ -50,9 +50,32 @@ uuid = { version = "1", features = ["v4"] }
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Async process (replaces polling with proper async I/O)
+tokio-process = "0.2"
+
+# Scheduler (cron-style persistent tasks)
+cron = "0.12"
+
+# Telegram bot (lightweight polling)
+teloxide = { version = "0.12", features = ["macros"], optional = true }
+
+# HTTP client for Telegram and webhooks
+reqwest = { version = "0.12", features = ["json"], optional = true }
+
+# JSON Schema for tool calling
+schemars = "0.8"
+
+# Base64 for signature encoding
+base64 = "0.22"
+
+[features]
+default = []
+telegram = ["teloxide", "reqwest"]
+
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
 tokio-test = "0.4"
+axum-test = "0.3"
 
 [profile.release]
 opt-level = 3

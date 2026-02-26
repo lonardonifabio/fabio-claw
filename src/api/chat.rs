@@ -6,10 +6,12 @@ use tracing::{info, warn, instrument};
 
 use crate::api::AppState;
 use crate::errors::AppError;
+use crate::llm::bpe_estimate;
 use crate::memory::ConversationEntry;
 use crate::plugins::{PluginRequest, PluginRunner};
+use crate::agent::AgentRunner;
 
-// ─── Request / Response types ─────────────────────────────────────────────────
+// ─── Request / Response types ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
@@ -22,6 +24,8 @@ pub struct ChatRequest {
     #[serde(default)]
     pub stream: bool,
     pub session_id: Option<String>,
+    /// Optional system prompt override (used for agent runs)
+    pub system: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -57,7 +61,7 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
-// ─── Handler ─────────────────────────────────────────────────────────────────
+// ─── Handler ────────────────────────────────────────────────────────────────
 
 #[instrument(skip(state, req), fields(model = %req.model))]
 pub async fn chat_completions(
@@ -78,10 +82,9 @@ pub async fn chat_completions(
 
     info!(session_id = %session_id, "Processing chat request");
 
-    // ── Check if the last user message is a /command ──────────────────────
+    // ── Check if the last user message is a /command ───────────────────────
     if let Some((command, args)) = extract_command(&req.messages) {
 
-        // Special built-in: /help — lists all registered plugins
         if command == "help" {
             let lines: Vec<String> = state.plugins.commands()
                 .iter()
@@ -95,12 +98,12 @@ pub async fn chat_completions(
             return ok_response(content, req.model, session_id, &state, &req.messages).await;
         }
 
-        // Look up command in the plugin registry (fully dynamic — no hardcoding)
         if let Some(manifest) = state.plugins.resolve(&command) {
             info!(plugin = %manifest.name, command = %command, "Dispatching to plugin");
 
+            // Standardised payload: only {"args": "..."} — plugin handles the rest
             let payload = if manifest.payload_from_args && !args.is_empty() {
-                serde_json::json!({ "args": args, "city": args, "expression": args, "path": args })
+                serde_json::json!({ "args": args })
             } else {
                 serde_json::json!({})
             };
@@ -110,14 +113,14 @@ pub async fn chat_completions(
                 payload,
             };
 
-            let plugin_dir = state.plugins.plugin_dir().to_string_lossy().to_string();
-            let runner = PluginRunner::new(plugin_dir);
+            let manifest_clone = manifest.clone();
+            let runner = PluginRunner::new(state.plugins.plugin_dir().to_string_lossy().as_ref());
 
-            let content = match runner.run(&manifest.name, &plugin_req, &state.device) {
-                Ok(r) if r.success => format_result(&manifest.name, &r.result),
+            let content = match runner.run(&manifest_clone, &plugin_req, &state.device).await {
+                Ok(r) if r.success => format_result(&manifest_clone.name, &r.result),
                 Ok(r) => format!("⚠️ Plugin error: {}", r.error.unwrap_or_else(|| "unknown".into())),
                 Err(e) => {
-                    warn!(error = %e, plugin = %manifest.name, "Plugin execution failed");
+                    warn!(error = %e, plugin = %manifest_clone.name, "Plugin execution failed");
                     format!("⚠️ Plugin failed: {}", e)
                 }
             };
@@ -125,7 +128,6 @@ pub async fn chat_completions(
             return ok_response(content, req.model, session_id, &state, &req.messages).await;
         }
 
-        // Unknown command — helpful error
         let content = format!(
             "⚠️ Unknown command `/{}`.\nType `/help` to see all available commands.",
             command
@@ -133,17 +135,67 @@ pub async fn chat_completions(
         return ok_response(content, req.model, session_id, &state, &req.messages).await;
     }
 
+    // ── Agent mode: ReAct loop ─────────────────────────────────────────────
+    if state.llm.agent_mode() {
+        let user_query = req.messages.last().map(|m| m.content.as_str()).unwrap_or("");
+        let system = req.system.as_deref();
+        let plugin_dir = state.plugins.plugin_dir().to_string_lossy().to_string();
+
+        let agent = AgentRunner::new(
+            state.llm.clone(),
+            state.plugins.clone(),
+            state.device.clone(),
+            &plugin_dir,
+        );
+
+        let (answer, steps) = agent
+            .run(user_query, system, req.max_tokens, req.temperature)
+            .await?;
+
+        // Include step trace as a debug comment in non-prod or as structured JSON
+        let content = if std::env::var("AGENT_TRACE").map(|v| v == "1").unwrap_or(false) {
+            format!(
+                "{}\n\n---\n🔍 Agent trace ({} steps):\n{}",
+                answer,
+                steps.len(),
+                serde_json::to_string_pretty(&steps).unwrap_or_default()
+            )
+        } else {
+            answer
+        };
+
+        let prompt_tokens     = bpe_estimate(user_query);
+        let completion_tokens = bpe_estimate(&content);
+        let user_msg = req.messages.last().map(|m| m.content.clone()).unwrap_or_default();
+
+        persist(&state, session_id, user_msg, content.clone(), req.model.clone()).await;
+
+        return Ok(Json(ChatResponse {
+            id: format!("chatcmpl-{}", Uuid::new_v4()),
+            object: "chat.completion".into(),
+            created: Utc::now().timestamp(),
+            model: req.model,
+            choices: vec![Choice {
+                index: 0,
+                message: ChatMessage { role: "assistant".into(), content },
+                finish_reason: "stop".into(),
+            }],
+            usage: Usage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+            },
+        }));
+    }
+
     // ── Standard LLM inference ────────────────────────────────────────────
     let prompt = build_prompt(&req.messages);
-    let response_text = state.llm
-        .infer(prompt.clone(), req.max_tokens, req.temperature)
+    let infer_result = state.llm
+        .infer_full(prompt.clone(), req.max_tokens, req.temperature)
         .await?;
 
-    let prompt_tokens     = estimate_tokens(&prompt);
-    let completion_tokens = estimate_tokens(&response_text);
     let user_msg = req.messages.last().map(|m| m.content.clone()).unwrap_or_default();
-
-    persist(&state, session_id, user_msg, response_text.clone(), req.model.clone()).await;
+    persist(&state, session_id, user_msg, infer_result.text.clone(), req.model.clone()).await;
 
     Ok(Json(ChatResponse {
         id: format!("chatcmpl-{}", Uuid::new_v4()),
@@ -152,16 +204,19 @@ pub async fn chat_completions(
         model: req.model,
         choices: vec![Choice {
             index: 0,
-            message: ChatMessage { role: "assistant".into(), content: response_text },
+            message: ChatMessage { role: "assistant".into(), content: infer_result.text },
             finish_reason: "stop".into(),
         }],
-        usage: Usage { prompt_tokens, completion_tokens, total_tokens: prompt_tokens + completion_tokens },
+        usage: Usage {
+            prompt_tokens: infer_result.prompt_tokens,
+            completion_tokens: infer_result.completion_tokens,
+            total_tokens: infer_result.prompt_tokens + infer_result.completion_tokens,
+        },
     }))
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// If the last user message starts with '/', returns (command, rest_of_line).
 fn extract_command(messages: &[ChatMessage]) -> Option<(String, String)> {
     let last = messages.iter().rev().find(|m| m.role == "user")?;
     let text = last.content.trim();
@@ -174,10 +229,6 @@ fn extract_command(messages: &[ChatMessage]) -> Option<(String, String)> {
     Some((cmd, args))
 }
 
-/// Format plugin JSON result into human-readable markdown.
-/// Plugins that want rich formatting can ship a "format" hint in their manifest
-/// (future). For now we pattern-match on known plugin names as a fallback,
-/// and emit a generic pretty-print for unknown ones.
 fn format_result(plugin_name: &str, result: &serde_json::Value) -> String {
     match plugin_name {
         "plugin-datetime" => format!(
@@ -224,7 +275,6 @@ fn format_result(plugin_name: &str, result: &serde_json::Value) -> String {
             if result["truncated"].as_bool().unwrap_or(false) { " (truncated)" } else { "" },
             result["content"].as_str().unwrap_or("(empty)"),
         ),
-        // Generic fallback for future plugins — pretty-print the JSON
         _ => serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string()),
     }
 }
@@ -238,7 +288,8 @@ async fn ok_response(
 ) -> Result<Json<ChatResponse>, AppError> {
     let user_msg = messages.last().map(|m| m.content.clone()).unwrap_or_default();
     persist(state, session_id, user_msg, content.clone(), model.clone()).await;
-    let t = estimate_tokens(&content);
+    let prompt_tokens     = bpe_estimate(&content);
+    let completion_tokens = prompt_tokens;
     Ok(Json(ChatResponse {
         id: format!("chatcmpl-{}", Uuid::new_v4()),
         object: "chat.completion".into(),
@@ -249,7 +300,11 @@ async fn ok_response(
             message: ChatMessage { role: "assistant".into(), content },
             finish_reason: "stop".into(),
         }],
-        usage: Usage { prompt_tokens: t, completion_tokens: t, total_tokens: t * 2 },
+        usage: Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        },
     }))
 }
 
@@ -277,8 +332,4 @@ fn build_prompt(messages: &[ChatMessage]) -> String {
     }
     p.push_str("<|assistant|>\n");
     p
-}
-
-fn estimate_tokens(text: &str) -> u32 {
-    (text.len() / 4).max(1) as u32
 }
