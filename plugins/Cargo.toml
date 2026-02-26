@@ -4,5 +4,16 @@ members = [
     "plugin-calculator",
     "plugin-weather",
     "plugin-file-reader",
+    # New plugins (v0.3.0)
+    "plugin-system-info",
+    "plugin-net-diagnostics",
+    "plugin-log-tail",
+    "plugin-scheduler",
+    "plugin-rag-local",
+    "plugin-gpio-control",
+    "plugin-updater",
+    "plugin-rag-internet",
+    # Note: plugin-word-builder and plugin-excel-builder are Python scripts,
+    # they do not need entries here.
 ]
 resolver = "2"
