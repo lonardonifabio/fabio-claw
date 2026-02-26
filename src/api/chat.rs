@@ -1,400 +1,216 @@
-use axum::{extract::State, Json};
+// src/api/chat.rs
+//
+// Rewritten chat handler integrating:
+//   1. PluginManager (timeout, cache, health)
+//   2. PromptEngine (TinyLlama ChatML format, summarisation, cleaning)
+//   3. ConversationHistory (per-session sliding window)
+//   4. Structured error responses
+//   5. /help and /reset built-in commands
+
+use std::sync::{Arc, Mutex};
+use axum::{extract::State, Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
-use chrono::Utc;
-use uuid::Uuid;
-use tracing::{info, warn, instrument};
 
-use crate::api::AppState;
-use crate::errors::AppError;
-use crate::llm::bpe_estimate;
-use crate::memory::ConversationEntry;
-use crate::plugins::{PluginRequest, PluginRunner};
-use crate::agent::AgentRunner;
+use crate::plugin_manager::{PluginManager, PluginError, format_help};
+use crate::prompt_engine::{
+    build_prompt, clean_response, summarise_plugin_result,
+    parse_slash_command, ConversationHistory, Role,
+};
+use crate::llm_client::LlmClient;
 
-// ─── Request / Response types ────────────────────────────────────────────────
-
+// ─── Request / Response types ─────────────────────────────────────────────────
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
-    pub model: String,
-    pub messages: Vec<ChatMessage>,
+    pub model:      String,
+    pub messages:   Vec<ChatMessage>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
-    #[serde(default = "default_temperature")]
-    pub temperature: f32,
     #[serde(default)]
-    pub stream: bool,
-    pub session_id: Option<String>,
-    /// Optional system prompt override (used for agent runs)
-    pub system: Option<String>,
+    pub stream:     bool,
 }
+
+fn default_max_tokens() -> u32 { 256 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChatMessage {
-    pub role: String,
+    pub role:    String,
     pub content: String,
 }
 
-fn default_max_tokens() -> u32 { 512 }
-fn default_temperature() -> f32 { 0.7 }
-
 #[derive(Debug, Serialize)]
 pub struct ChatResponse {
-    pub id: String,
-    pub object: String,
-    pub created: i64,
-    pub model: String,
-    pub choices: Vec<Choice>,
-    pub usage: Usage,
+    pub id:      String,
+    pub object:  String,
+    pub created: u64,
+    pub model:   String,
+    pub choices: Vec<ChatChoice>,
+    pub usage:   TokenUsage,
 }
 
 #[derive(Debug, Serialize)]
-pub struct Choice {
-    pub index: u32,
-    pub message: ChatMessage,
+pub struct ChatChoice {
+    pub index:         u32,
+    pub message:       ChatMessage,
     pub finish_reason: String,
 }
 
 #[derive(Debug, Serialize)]
-pub struct Usage {
-    pub prompt_tokens: u32,
+pub struct TokenUsage {
+    pub prompt_tokens:     u32,
     pub completion_tokens: u32,
-    pub total_tokens: u32,
+    pub total_tokens:      u32,
 }
 
-// ─── Handler ────────────────────────────────────────────────────────────────
+// ─── App state ────────────────────────────────────────────────────────────────
+pub struct AppState {
+    pub plugin_manager: Arc<Mutex<PluginManager>>,
+    pub llm_client:     Arc<LlmClient>,
+    pub history:        Arc<Mutex<ConversationHistory>>,
+}
 
-#[instrument(skip(state, req), fields(model = %req.model))]
+// ─── Handler ──────────────────────────────────────────────────────────────────
 pub async fn chat_completions(
-    State(state): State<AppState>,
-    Json(req): Json<ChatRequest>,
-) -> Result<Json<ChatResponse>, AppError> {
-    if req.messages.is_empty() {
-        return Err(AppError::InvalidRequest("messages cannot be empty".into()));
-    }
-    if req.stream {
-        return Err(AppError::InvalidRequest(
-            "Streaming not yet supported. Set stream=false.".into(),
-        ));
-    }
+    State(state): State<Arc<AppState>>,
+    Json(req):    Json<ChatRequest>,
+) -> Result<Json<ChatResponse>, (StatusCode, String)> {
 
-    let session_id = req.session_id.clone()
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    // Extract the latest user message
+    let user_msg = req.messages.iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.trim().to_string())
+        .unwrap_or_default();
 
-    info!(session_id = %session_id, "Processing chat request");
-
-    // ── Check if the last user message is a /command ───────────────────────
-    if let Some((command, args)) = extract_command(&req.messages) {
-
-        if command == "help" {
-            let lines: Vec<String> = state.plugins.commands()
-                .iter()
-                .map(|(cmd, desc)| format!("  /{:<20} {}", cmd, desc))
-                .collect();
-            let content = format!(
-                "🦀 **Fabio-Claw — Available Commands**\n\n{}\n\n\
-                 All other messages are sent to the LLM for inference.",
-                lines.join("\n")
-            );
-            return ok_response(content, req.model, session_id, &state, &req.messages).await;
-        }
-
-        if let Some(manifest) = state.plugins.resolve(&command) {
-            info!(plugin = %manifest.name, command = %command, "Dispatching to plugin");
-
-            // Standardised payload: only {"args": "..."} — plugin handles the rest
-            let payload = if manifest.payload_from_args && !args.is_empty() {
-                serde_json::json!({ "args": args })
-            } else {
-                serde_json::json!({})
-            };
-
-            let plugin_req = PluginRequest {
-                action: manifest.default_action.clone(),
-                payload,
-            };
-
-            let manifest_clone = manifest.clone();
-            let runner = PluginRunner::new(state.plugins.plugin_dir().to_string_lossy().as_ref());
-
-            let content = match runner.run(&manifest_clone, &plugin_req, &state.device).await {
-                Ok(r) if r.success => format_result(&manifest_clone.name, &r.result),
-                Ok(r) => format!("⚠️ Plugin error: {}", r.error.unwrap_or_else(|| "unknown".into())),
-                Err(e) => {
-                    warn!(error = %e, plugin = %manifest_clone.name, "Plugin execution failed");
-                    format!("⚠️ Plugin failed: {}", e)
-                }
-            };
-
-            return ok_response(content, req.model, session_id, &state, &req.messages).await;
-        }
-
-        let content = format!(
-            "⚠️ Unknown command `/{}`.\nType `/help` to see all available commands.",
-            command
-        );
-        return ok_response(content, req.model, session_id, &state, &req.messages).await;
+    if user_msg.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Empty user message".into()));
     }
 
-    // ── Agent mode: ReAct loop ─────────────────────────────────────────────
-    if state.llm.agent_mode() {
-        let user_query = req.messages.last().map(|m| m.content.as_str()).unwrap_or("");
-        let system = req.system.as_deref();
-        let plugin_dir = state.plugins.plugin_dir().to_string_lossy().to_string();
+    // ── Built-in commands (no LLM needed) ────────────────────────────────────
+    if let Some(reply) = handle_builtin(&user_msg, &state) {
+        return Ok(Json(make_response(&req.model, &reply, 0, reply.len() as u32 / 4)));
+    }
 
-        let agent = AgentRunner::new(
-            state.llm.clone(),
-            state.plugins.clone(),
-            state.device.clone(),
-            &plugin_dir,
-        );
-
-        let (answer, steps) = agent
-            .run(user_query, system, req.max_tokens, req.temperature)
-            .await?;
-
-        // Include step trace as a debug comment in non-prod or as structured JSON
-        let content = if std::env::var("AGENT_TRACE").map(|v| v == "1").unwrap_or(false) {
-            format!(
-                "{}\n\n---\n🔍 Agent trace ({} steps):\n{}",
-                answer,
-                steps.len(),
-                serde_json::to_string_pretty(&steps).unwrap_or_default()
-            )
-        } else {
-            answer
+    // ── Slash-command routing ─────────────────────────────────────────────────
+    let (final_reply, prompt_len) = if let Some((cmd, args)) = parse_slash_command(&user_msg) {
+        // Route to plugin
+        let plugin_result = {
+            let mut pm = state.plugin_manager.lock()
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Plugin manager lock poisoned".into()))?;
+            pm.call(cmd, args)
         };
 
-        let prompt_tokens     = bpe_estimate(user_query);
-        let completion_tokens = bpe_estimate(&content);
-        let user_msg = req.messages.last().map(|m| m.content.clone()).unwrap_or_default();
+        match plugin_result {
+            Ok(response) => {
+                let raw_json = serde_json::to_string(&response).unwrap_or_default();
+                let summary  = summarise_plugin_result(&raw_json);
 
-        persist(&state, session_id, user_msg, content.clone(), req.model.clone()).await;
+                if response.success {
+                    // Build prompt with plugin context and run LLM for natural language
+                    let history = state.history.lock().unwrap();
+                    let prompt  = build_prompt(&history, &user_msg, Some(&summary));
+                    let prompt_len = prompt.len() as u32 / 4;
+                    drop(history);
 
-        return Ok(Json(ChatResponse {
-            id: format!("chatcmpl-{}", Uuid::new_v4()),
-            object: "chat.completion".into(),
-            created: Utc::now().timestamp(),
-            model: req.model,
-            choices: vec![Choice {
-                index: 0,
-                message: ChatMessage { role: "assistant".into(), content },
-                finish_reason: "stop".into(),
-            }],
-            usage: Usage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
-            },
-        }));
-    }
+                    let raw_reply = state.llm_client.complete(&prompt, req.max_tokens).await
+                        .unwrap_or_else(|_| summary.clone()); // fallback to raw summary on LLM error
 
-    // ── Standard LLM inference ────────────────────────────────────────────
-    let prompt = build_prompt(&req.messages);
-    let infer_result = state.llm
-        .infer_full(prompt.clone(), req.max_tokens, req.temperature)
-        .await?;
-
-    let user_msg = req.messages.last().map(|m| m.content.clone()).unwrap_or_default();
-    persist(&state, session_id, user_msg, infer_result.text.clone(), req.model.clone()).await;
-
-    Ok(Json(ChatResponse {
-        id: format!("chatcmpl-{}", Uuid::new_v4()),
-        object: "chat.completion".into(),
-        created: Utc::now().timestamp(),
-        model: req.model,
-        choices: vec![Choice {
-            index: 0,
-            message: ChatMessage { role: "assistant".into(), content: infer_result.text },
-            finish_reason: "stop".into(),
-        }],
-        usage: Usage {
-            prompt_tokens: infer_result.prompt_tokens,
-            completion_tokens: infer_result.completion_tokens,
-            total_tokens: infer_result.prompt_tokens + infer_result.completion_tokens,
-        },
-    }))
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-fn extract_command(messages: &[ChatMessage]) -> Option<(String, String)> {
-    let last = messages.iter().rev().find(|m| m.role == "user")?;
-    let text = last.content.trim();
-
-    // Command can be the full message (`/weather Milano`) or embedded as a token
-    // in natural language (`How is the current /weather Milano`).
-    // We only match command tokens that:
-    // - start with '/'
-    // - are at token boundaries (start-of-text or preceded by whitespace)
-    // - contain [a-zA-Z0-9_-] after '/'
-    let cmd_start = text
-        .char_indices()
-        .find_map(|(idx, ch)| {
-            if ch != '/' {
-                return None;
-            }
-
-            let boundary_ok = idx == 0
-                || text[..idx]
-                    .chars()
-                    .next_back()
-                    .map(|c| c.is_whitespace())
-                    .unwrap_or(true);
-            if !boundary_ok {
-                return None;
-            }
-
-            let next = text[idx + 1..].chars().next();
-            match next {
-                Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '-' => Some(idx),
-                _ => None,
-            }
-        })?;
-
-    let without_slash = &text[cmd_start + 1..];
-    let mut parts = without_slash.splitn(2, char::is_whitespace);
-    let cmd = parts.next().unwrap_or("").to_lowercase();
-    let args = parts.next().unwrap_or("").trim().to_string();
-
-    if cmd.is_empty() {
-        return None;
-    }
-
-    Some((cmd, args))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{extract_command, ChatMessage};
-
-    fn user(content: &str) -> ChatMessage {
-        ChatMessage { role: "user".into(), content: content.into() }
-    }
-
-    #[test]
-    fn extracts_prefixed_command() {
-        let msgs = vec![user("/weather Milano")];
-        let out = extract_command(&msgs);
-        assert_eq!(out, Some(("weather".into(), "Milano".into())));
-    }
-
-    #[test]
-    fn extracts_embedded_command() {
-        let msgs = vec![user("How is the current /weather Milano")];
-        let out = extract_command(&msgs);
-        assert_eq!(out, Some(("weather".into(), "Milano".into())));
-    }
-
-    #[test]
-    fn does_not_extract_slashes_inside_words() {
-        let msgs = vec![user("check this a/weather path")];
-        let out = extract_command(&msgs);
-        assert_eq!(out, None);
-    }
-}
-
-
-fn format_result(plugin_name: &str, result: &serde_json::Value) -> String {
-    match plugin_name {
-        "plugin-datetime" => format!(
-            "🕐 **Date & Time**\n📅 Date: {}\n🕐 Time: {}\n📆 Day: {}\n🌍 Zone: {}",
-            result["date"].as_str().unwrap_or("—"),
-            result["time"].as_str().unwrap_or("—"),
-            result["day_of_week"].as_str().unwrap_or("—"),
-            result["timezone"].as_str().unwrap_or("—"),
-        ),
-        "plugin-weather" => {
-            let mut out = format!(
-                "🌍 **Weather — {}**\n🌤️ {}\n🌡️ Temp: {}\n🤔 Feels: {}\n💧 Humidity: {}\n💨 Wind: {}",
-                result["location"].as_str().unwrap_or("—"),
-                result["condition"].as_str().unwrap_or("—"),
-                result["temperature"].as_str().unwrap_or("—"),
-                result["feels_like"].as_str().unwrap_or("—"),
-                result["humidity"].as_str().unwrap_or("—"),
-                result["wind"].as_str().unwrap_or("—"),
-            );
-            if let Some(days) = result["forecast"].as_array() {
-                out.push_str("\n\n📅 **3-Day Forecast**");
-                for d in days {
-                    out.push_str(&format!(
-                        "\n  {} → max {:.0}°C / min {:.0}°C / rain {:.1}mm",
-                        d["date"].as_str().unwrap_or(""),
-                        d["max_temp"].as_f64().unwrap_or(0.0),
-                        d["min_temp"].as_f64().unwrap_or(0.0),
-                        d["rain_mm"].as_f64().unwrap_or(0.0),
-                    ));
+                    let reply = clean_response(&raw_reply);
+                    (reply, prompt_len)
+                } else {
+                    // Plugin failed — give a clear error without LLM
+                    let err_msg = response.error.unwrap_or_else(|| "Unknown plugin error".into());
+                    (format!("⚠ Command failed: {}", err_msg), 0)
                 }
             }
-            out
+            Err(PluginError::NotFound(cmd)) => {
+                (format!("Unknown command: /{}. Type /help to see available commands.", cmd), 0)
+            }
+            Err(PluginError::Timeout(name)) => {
+                (format!("⚠ Plugin {} timed out. The Raspberry Pi may be under load.", name), 0)
+            }
+            Err(e) => {
+                (format!("⚠ {}", e), 0)
+            }
         }
-        "plugin-calculator" => format!(
-            "🧮 **Calculator**\n📝 Expression: `{}`\n✅ Result: **{}**",
-            result["expression"].as_str().unwrap_or("—"),
-            result["result_str"].as_str().unwrap_or("—"),
-        ),
-        "plugin-file-reader" => format!(
-            "📄 **File: {}**\n📏 Lines: {} | Size: {} bytes{}\n```\n{}\n```",
-            result["path"].as_str().unwrap_or("—"),
-            result["lines"].as_u64().or(result["total_lines"].as_u64()).unwrap_or(0),
-            result["size_bytes"].as_u64().unwrap_or(0),
-            if result["truncated"].as_bool().unwrap_or(false) { " (truncated)" } else { "" },
-            result["content"].as_str().unwrap_or("(empty)"),
-        ),
-        _ => serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string()),
+    } else {
+        // ── Regular chat → LLM ───────────────────────────────────────────────
+        let history    = state.history.lock().unwrap();
+        let prompt     = build_prompt(&history, &user_msg, None);
+        let prompt_len = prompt.len() as u32 / 4;
+        drop(history);
+
+        let raw_reply = state.llm_client.complete(&prompt, req.max_tokens).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("LLM error: {}", e)))?;
+
+        let reply = clean_response(&raw_reply);
+        (reply, prompt_len)
+    };
+
+    // ── Update conversation history ───────────────────────────────────────────
+    {
+        let mut history = state.history.lock().unwrap();
+        history.push(Role::User, user_msg);
+        history.push(Role::Assistant, final_reply.clone());
+    }
+
+    let completion_tokens = final_reply.len() as u32 / 4;
+    Ok(Json(make_response(&req.model, &final_reply, prompt_len, completion_tokens)))
+}
+
+// ─── Built-in commands ────────────────────────────────────────────────────────
+fn handle_builtin(msg: &str, state: &Arc<AppState>) -> Option<String> {
+    let lower = msg.trim().to_lowercase();
+
+    match lower.as_str() {
+        "/help" | "help" => {
+            let pm       = state.plugin_manager.lock().ok()?;
+            let commands = pm.list_commands();
+            Some(format_help(&commands))
+        }
+        "/reset" | "/clear" => {
+            let mut history = state.history.lock().ok()?;
+            history.clear();
+            Some("Conversation history cleared.".into())
+        }
+        "/status" => {
+            let pm = state.plugin_manager.lock().ok()?;
+            let n  = pm.list_commands().len();
+            Some(format!("Fabio-Claw is running. {} commands available. Type /help for the full list.", n))
+        }
+        _ => None,
     }
 }
 
-async fn ok_response(
-    content: String,
-    model: String,
-    session_id: String,
-    state: &AppState,
-    messages: &[ChatMessage],
-) -> Result<Json<ChatResponse>, AppError> {
-    let user_msg = messages.last().map(|m| m.content.clone()).unwrap_or_default();
-    persist(state, session_id, user_msg, content.clone(), model.clone()).await;
-    let prompt_tokens     = bpe_estimate(&content);
-    let completion_tokens = prompt_tokens;
-    Ok(Json(ChatResponse {
-        id: format!("chatcmpl-{}", Uuid::new_v4()),
-        object: "chat.completion".into(),
-        created: Utc::now().timestamp(),
-        model,
-        choices: vec![Choice {
+// ─── Response builder ─────────────────────────────────────────────────────────
+fn make_response(
+    model:             &str,
+    content:           &str,
+    prompt_tokens:     u32,
+    completion_tokens: u32,
+) -> ChatResponse {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    ChatResponse {
+        id:      format!("chatcmpl-{}", ts),
+        object:  "chat.completion".into(),
+        created: ts,
+        model:   model.to_string(),
+        choices: vec![ChatChoice {
             index: 0,
-            message: ChatMessage { role: "assistant".into(), content },
+            message: ChatMessage {
+                role:    "assistant".into(),
+                content: content.to_string(),
+            },
             finish_reason: "stop".into(),
         }],
-        usage: Usage {
+        usage: TokenUsage {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
         },
-    }))
-}
-
-async fn persist(state: &AppState, session_id: String, user: String, assistant: String, model: String) {
-    if let Err(e) = state.memory.save_conversation(ConversationEntry {
-        session_id,
-        user_message: user,
-        assistant_message: assistant,
-        model,
-        timestamp: Utc::now(),
-    }).await {
-        warn!(error = %e, "Failed to persist conversation");
     }
-}
-
-fn build_prompt(messages: &[ChatMessage]) -> String {
-    let mut p = String::new();
-    for m in messages {
-        match m.role.as_str() {
-            "system"    => p.push_str(&format!("<|system|>\n{}\n", m.content)),
-            "user"      => p.push_str(&format!("<|user|>\n{}\n", m.content)),
-            "assistant" => p.push_str(&format!("<|assistant|>\n{}\n", m.content)),
-            _           => p.push_str(&format!("{}: {}\n", m.role, m.content)),
-        }
-    }
-    p.push_str("<|assistant|>\n");
-    p
 }

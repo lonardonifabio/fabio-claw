@@ -6,6 +6,8 @@
   "default_action": "now",
   "payload_from_args": false,
   "require_signature": false,
+  "cacheable": true,
+  "cache_ttl_secs": 5,
   "tool_schema": {
     "description": "Return the current date, time, day of week and timezone of the device.",
     "parameters": {

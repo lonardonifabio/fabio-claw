@@ -6,6 +6,8 @@
   "default_action": "weather",
   "payload_from_args": true,
   "require_signature": false,
+  "cacheable": true,
+  "cache_ttl_secs": 300,
   "tool_schema": {
     "description": "Fetch live weather conditions and 3-day forecast for any city using Open-Meteo (no API key required).",
     "parameters": {
