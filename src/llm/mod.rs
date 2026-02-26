@@ -6,9 +6,12 @@ use tracing::{info, instrument, warn, error};
 
 use crate::errors::AppError;
 
-const QUEUE_CAPACITY: usize = 32;
+/// const QUEUE_CAPACITY: usize = 32;
+/// const INFERENCE_TIMEOUT_SECS: u64 = 120;
+/// const N_CTX: u32 = 2048;
+const QUEUE_CAPACITY: usize = 8;
 const INFERENCE_TIMEOUT_SECS: u64 = 120;
-const N_CTX: u32 = 2048;
+const N_CTX: u32 = 1024;
 
 #[allow(dead_code)]
 struct InferRequest {
