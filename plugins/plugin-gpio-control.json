@@ -1,0 +1,15 @@
+{
+  "name": "plugin-gpio-control",
+  "version": "0.1.0",
+  "description": "Raspberry Pi GPIO via sysfs. Usage: /gpio on <pin> | /gpio off <pin> | /gpio read <pin>",
+  "commands": ["gpio"],
+  "default_action": "gpio",
+  "payload_from_args": true,
+  "require_signature": false,
+  "tool_schema": {
+    "description": "Control Raspberry Pi GPIO pins (BCM 2-27). Requires user in gpio group.",
+    "parameters": { "type": "object", "properties": {
+      "args": { "type": "string", "description": "'on 17', 'off 17', 'read 17', or 'status'" }
+    }, "required": ["args"] }
+  }
+}

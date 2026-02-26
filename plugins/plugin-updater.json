@@ -1,0 +1,15 @@
+{
+  "name": "plugin-updater",
+  "version": "0.1.0",
+  "description": "Safe update check and plan (read-only). Usage: /update-check | /update-plan",
+  "commands": ["update-check", "update-plan"],
+  "default_action": "check",
+  "payload_from_args": true,
+  "require_signature": false,
+  "tool_schema": {
+    "description": "Check for system/fabio-claw updates and generate a safe update plan. Never executes updates.",
+    "parameters": { "type": "object", "properties": {
+      "args": { "type": "string", "description": "Optional target: 'system', 'fabio-claw', or empty for both" }
+    }, "required": [] }
+  }
+}

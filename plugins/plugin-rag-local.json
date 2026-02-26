@@ -1,0 +1,15 @@
+{
+  "name": "plugin-rag-local",
+  "version": "0.1.0",
+  "description": "Local document search (RAG) via SQLite FTS5. Usage: /kb <query> | /search-doc <query>",
+  "commands": ["kb", "search-doc"],
+  "default_action": "search",
+  "payload_from_args": true,
+  "require_signature": false,
+  "tool_schema": {
+    "description": "Search local indexed documents using full-text search (BM25). Index with /kb index <path>.",
+    "parameters": { "type": "object", "properties": {
+      "args": { "type": "string", "description": "Search query, or 'index <path>' to index a directory" }
+    }, "required": [] }
+  }
+}

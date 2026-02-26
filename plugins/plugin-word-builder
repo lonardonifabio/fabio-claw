@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""plugin-word-builder — generate .docx files.
+Requires: pip install python-docx --break-system-packages
+"""
+import sys, json, os, re
+from datetime import datetime
+from pathlib import Path
+
+OUTPUT_DIR   = "/var/lib/fabio-claw/documents"
+FALLBACK_DIR = "/tmp/fabio-claw/documents"
+
+TEMPLATES = {
+    "meeting-minutes": {
+        "title":    "Meeting Minutes",
+        "sections": ["Attendees", "Agenda", "Discussion", "Action Items", "Next Meeting"]
+    },
+    "report": {
+        "title":    "Technical Report",
+        "sections": ["Executive Summary", "Introduction", "Analysis", "Conclusions", "Recommendations"]
+    },
+    "letter": {
+        "title":    "Formal Letter",
+        "sections": ["Recipient", "Subject", "Body", "Closing"]
+    },
+    "sop": {
+        "title":    "Standard Operating Procedure",
+        "sections": ["Purpose", "Scope", "Responsibilities", "Procedure", "References"]
+    },
+}
+
+def main():
+    raw = sys.stdin.read()
+    try:
+        req = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(json.dumps({"success": False, "result": None, "error": f"Invalid JSON: {e}"}))
+        return
+    action = req.get("action", "generate")
+    args   = req.get("payload", {}).get("args", "").strip()
+    try:
+        if action in ("template", "doc-template"):
+            result = handle_template(args)
+        else:
+            result = handle_generate(args)
+        print(json.dumps({"success": True, "result": result, "error": None}))
+    except ImportError:
+        print(json.dumps({"success": False, "result": None,
+            "error": "python-docx not installed. Run: pip install python-docx --break-system-packages"}))
+    except Exception as e:
+        print(json.dumps({"success": False, "result": None, "error": str(e)}))
+
+def get_out():
+    for d in [OUTPUT_DIR, FALLBACK_DIR, "/tmp"]:
+        p = Path(d)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+        except PermissionError:
+            continue
+    return Path("/tmp")
+
+def handle_template(args):
+    if not args:
+        return {"available_templates": list(TEMPLATES.keys()),
+                "usage": "/doc-template <n>  e.g. /doc-template meeting-minutes"}
+    name = args.lower().replace(" ", "-")
+    tpl  = TEMPLATES.get(name)
+    if not tpl:
+        return {"error": f"Template '{name}' not found.", "available": list(TEMPLATES.keys())}
+    return make_from_template(name, tpl)
+
+def handle_generate(args):
+    if not args:
+        return {"error": "Provide a description. Usage: /make-docx <description>",
+                "templates": list(TEMPLATES.keys())}
+    for name in TEMPLATES:
+        if name in args.lower():
+            return make_from_template(name, TEMPLATES[name])
+    return make_freeform(args)
+
+def make_from_template(name, tpl):
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    doc = Document()
+    now = datetime.now()
+    safe  = re.sub(r'[^a-z0-9_-]', '', name)
+    fname = f"{safe}_{now.strftime('%Y%m%d_%H%M%S')}.docx"
+    out   = get_out() / fname
+    tp = doc.add_heading(tpl["title"], 0)
+    tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    m = doc.add_paragraph()
+    m.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = m.add_run(f"Date: {now.strftime('%B %d, %Y')}")
+    r.font.size      = Pt(10)
+    r.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+    doc.add_paragraph()
+    for section in tpl["sections"]:
+        doc.add_heading(section, level=1)
+        doc.add_paragraph("[Fill in this section]")
+        doc.add_paragraph()
+    doc.save(str(out))
+    return {"template": name, "file": str(out), "filename": fname,
+            "sections": tpl["sections"], "created_at": now.isoformat()}
+
+def make_freeform(prompt):
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    doc   = Document()
+    now   = datetime.now()
+    title = prompt.split('.')[0].strip()[:60] or "Generated Document"
+    safe  = re.sub(r'[^a-z0-9]', '_', title.lower())[:40]
+    fname = f"doc_{safe}_{now.strftime('%Y%m%d_%H%M%S')}.docx"
+    out   = get_out() / fname
+    h = doc.add_heading(title, 0)
+    h.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    m = doc.add_paragraph()
+    m.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = m.add_run(f"Generated: {now.strftime('%B %d, %Y %H:%M')}")
+    r.font.size      = Pt(10)
+    r.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
+    doc.add_paragraph()
+    for para in [p.strip() for p in prompt.split('\n') if p.strip()]:
+        if para.endswith(':') and len(para) < 60:
+            doc.add_heading(para.rstrip(':'), level=1)
+        elif para.isupper() and len(para) < 60:
+            doc.add_heading(para.title(), level=1)
+        else:
+            doc.add_paragraph(para)
+    doc.save(str(out))
+    return {"file": str(out), "filename": fname, "title": title,
+            "created_at": now.isoformat()}
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,15 @@
+{
+  "name": "plugin-word-builder",
+  "version": "0.1.0",
+  "description": "Generate Word .docx from prompts or templates (requires python-docx). Usage: /make-docx <prompt> | /doc-template <n>",
+  "commands": ["make-docx", "doc-template"],
+  "default_action": "generate",
+  "payload_from_args": true,
+  "require_signature": false,
+  "tool_schema": {
+    "description": "Generate a Word document (.docx) from a text prompt or template name.",
+    "parameters": { "type": "object", "properties": {
+      "args": { "type": "string", "description": "Content prompt or template name" }
+    }, "required": ["args"] }
+  }
+}

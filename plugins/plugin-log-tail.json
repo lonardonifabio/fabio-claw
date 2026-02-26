@@ -1,0 +1,15 @@
+{
+  "name": "plugin-log-tail",
+  "version": "0.1.0",
+  "description": "Tail application logs with secret sanitization. Usage: /logs [n] | /errors [n]",
+  "commands": ["logs", "errors"],
+  "default_action": "logs",
+  "payload_from_args": true,
+  "require_signature": false,
+  "tool_schema": {
+    "description": "Read the fabio-claw application log, optionally filtering to errors only.",
+    "parameters": { "type": "object", "properties": {
+      "args": { "type": "string", "description": "Number of lines to return (default 20), e.g. '50'" }
+    }, "required": [] }
+  }
+}
