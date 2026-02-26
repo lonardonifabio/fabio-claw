@@ -244,10 +244,21 @@ wget -O /opt/fabio-claw/models/model.gguf \
   https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
 ```
 
+**Phi-2 2.7B Q4:**
+```bash
+wget -O /opt/fabio-claw/models/phi-2.Q4_K_M.gguf \
+https://huggingface.co/TheBloke/Phi-2-GGUF/resolve/main/phi-2.Q4_K_M.gguf
+```
+
 **Mistral 7B (8GB Pi, best quality ~60-120s per response):**
 ```bash
 wget -O /opt/fabio-claw/models/model.gguf \
   https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf
+```
+**Gemma 2b:**
+```bash
+wget -O /opt/fabio-claw/models/gemma-2-2b-it.q4_k_m.gguf \
+  https://huggingface.co/unsloth/gemma-2-it-GGUF/resolve/main/gemma-2-2b-it.q4_k_m.gguf
 ```
 
 Verify the download:
