@@ -4,5 +4,19 @@
   "description": "Read local files safely (e.g. /file read /home/pi/documents/notes.txt)",
   "commands": ["file"],
   "default_action": "read",
-  "payload_from_args": true
+  "payload_from_args": true,
+  "require_signature": false,
+  "tool_schema": {
+    "description": "Read, list, or preview local files within allowed directories on the device.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "string",
+          "description": "File path to read or directory path to list, e.g. '/home/pi/documents/notes.txt'"
+        }
+      },
+      "required": ["args"]
+    }
+  }
 }

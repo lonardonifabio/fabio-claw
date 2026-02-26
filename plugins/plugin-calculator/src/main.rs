@@ -34,13 +34,19 @@ fn main() {
 fn handle(req: PluginRequest) -> PluginResponse {
     match req.action.as_str() {
         "calculate" | "eval" | "compute" => {
-            let expr = match req.payload.get("expression").and_then(|v| v.as_str()) {
-                Some(e) => e.to_string(),
-                None => {
+            // Standardised payload: read "args" first, fall back to legacy "expression"
+            let expr = req.payload.get("args")
+                .and_then(|v| v.as_str())
+                .or_else(|| req.payload.get("expression").and_then(|v| v.as_str()))
+                .map(|s| s.to_string());
+
+            let expr = match expr {
+                Some(e) if !e.trim().is_empty() => e,
+                _ => {
                     return PluginResponse {
                         success: false,
                         result: Value::Null,
-                        error: Some("Missing 'expression' in payload".into()),
+                        error: Some("Missing or empty expression in 'args'".into()),
                     }
                 }
             };

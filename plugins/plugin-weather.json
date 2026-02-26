@@ -4,5 +4,19 @@
   "description": "Live weather + 3-day forecast via Open-Meteo (e.g. /weather Milan)",
   "commands": ["weather", "forecast", "meteo"],
   "default_action": "weather",
-  "payload_from_args": true
+  "payload_from_args": true,
+  "require_signature": false,
+  "tool_schema": {
+    "description": "Fetch live weather conditions and 3-day forecast for any city using Open-Meteo (no API key required).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "string",
+          "description": "City name, e.g. 'Milan' or 'New York'"
+        }
+      },
+      "required": ["args"]
+    }
+  }
 }

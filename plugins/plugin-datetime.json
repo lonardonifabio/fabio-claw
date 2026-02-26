@@ -4,5 +4,14 @@
   "description": "Current date, time and timezone",
   "commands": ["datetime", "time", "date", "now"],
   "default_action": "now",
-  "payload_from_args": false
+  "payload_from_args": false,
+  "require_signature": false,
+  "tool_schema": {
+    "description": "Return the current date, time, day of week and timezone of the device.",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  }
 }

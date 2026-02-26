@@ -335,7 +335,7 @@
 </header>
 
 <div id="chat">
-  <div class="sys-banner">FABIO-CLAW v0.1.0 // LOCAL INFERENCE // OFFLINE-CAPABLE</div>
+  <div class="sys-banner">FABIO-CLAW v0.2.0 // LOCAL INFERENCE // OFFLINE-CAPABLE</div>
 </div>
 
 <div id="stats">
@@ -367,8 +367,6 @@
 
 <script>
   // ── CONFIG ──
-  // If the HTML is served from the same host as the API, use relative URL.
-  // If opened as a local file, point to the Pi's IP directly.
   const API_BASE = window.location.hostname === 'localhost' || window.location.hostname !== ''
     ? `http://${window.location.hostname || 'localhost'}:8080`
     : 'http://localhost:8080';
@@ -528,7 +526,7 @@
   function clearChat() {
     messages = [];
     const chat = document.getElementById('chat');
-    chat.innerHTML = '<div class="sys-banner">FABIO-CLAW v0.1.0 // CHAT CLEARED</div>';
+    chat.innerHTML = '<div class="sys-banner">FABIO-CLAW v0.2.0 // CHAT CLEARED</div>';
     document.getElementById('stats').classList.remove('visible');
   }
 

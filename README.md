@@ -32,13 +32,16 @@ HTTP API (axum)
 Request Queue (mpsc, bounded=32)   ← Backpressure protection
      │
      ▼
+ReAct Agent Loop (optional)        ← Thought → Action → Observation → Answer
+     │
+     ▼
 LLM Worker (single OS thread)      ← No concurrent model access, deterministic
      │
      ▼
 llama.cpp inference                ← Local GGUF model, fully offline
      │
      ▼
-SQLite Memory + Audit              ← Conversation history, audit trail
+SQLite Memory + Audit              ← Conversation history, RAG chunks, tasks
      │
      ▼
 Plugin Sandbox (child process)     ← JSON over STDIN/STDOUT, 10s timeout, sig-verified
@@ -49,16 +52,22 @@ Plugin Sandbox (child process)     ← JSON over STDIN/STDOUT, 10s timeout, sig-
 ## Features
 
 ### ✅ Implemented
-- **OpenAI-compatible API** — `POST /v1/chat/completions`, `GET /v1/models`
+- **OpenAI-compatible API** — `POST /v1/chat/completions`, `GET /v1/models`, `GET /v1/tools`
 - **Single-threaded LLM actor** — deterministic, no async mutex around model
 - **Bounded request queue** — backpressure protection, 60s inference timeout
-- **SQLite memory layer** — conversation persistence, audit logging
+- **SQLite memory layer** — conversation persistence, RAG chunks, audit logging
 - **Device cryptographic identity** — Ed25519 keypair, generated on first boot
 - **Sandboxed plugin system** — process isolation, signature verification, hard timeout
 - **Health endpoints** — `/health`, `/health/ready`
 - **Graceful shutdown** — SIGTERM + Ctrl-C handled
 - **Mock inference mode** — runs without a model file for development/testing
 - **Chat UI** — browser-based chat interface served via HTTP
+- **ReAct agent loop** — Thought/Action/Observation cycle with plugin tool calling
+- **OpenAI-style tool definitions** — plugin manifests expose `tool_schema` at `GET /v1/tools`
+- **Telegram bot integration** — long-polling, zero-CPU idle, allowlist support
+- **Persistent task scheduler** — cron-backed, survives reboots, REST API
+- **Local RAG in SQLite** — cosine-similarity search over embedded document chunks
+- **Real token accounting** — BPE estimator + actual llama.cpp token counts
 
 ### 🔮 Roadmap
 - [ ] Streaming responses (`stream: true`)
@@ -78,22 +87,51 @@ fabio-claw/
 ├── Cargo.toml
 ├── README.md
 ├── chat.html            # Browser chat UI
-└── src/
-    ├── main.rs              # Entry point, config, server bootstrap
-    ├── errors.rs            # Unified error types with HTTP mapping
-    ├── api/
-    │   ├── mod.rs           # Router, AppState
-    │   ├── chat.rs          # POST /v1/chat/completions
-    │   ├── health.rs        # GET /health, /health/ready
-    │   └── models.rs        # GET /v1/models
-    ├── llm/
-    │   └── mod.rs           # LLM actor, single-threaded inference worker
-    ├── memory/
-    │   └── mod.rs           # SQLite conversation + audit store
-    ├── security/
-    │   └── mod.rs           # Ed25519 device identity, plugin verification
-    └── plugins/
-        └── mod.rs           # Sandboxed plugin runner
+├── src/
+│   ├── main.rs              # Entry point, config, server bootstrap
+│   ├── lib.rs               # Library entry point (for integration tests)
+│   ├── errors.rs            # Unified error types with HTTP mapping
+│   ├── agent/
+│   │   └── mod.rs           # ReAct agent loop (AGENT_MODE=true)
+│   ├── api/
+│   │   ├── mod.rs           # Router, AppState, /v1/tools endpoint
+│   │   ├── chat.rs          # POST /v1/chat/completions
+│   │   ├── health.rs        # GET /health, /health/ready
+│   │   ├── models.rs        # GET /v1/models
+│   │   └── scheduler.rs     # GET|POST /v1/tasks, DELETE /v1/tasks/:name
+│   ├── llm/
+│   │   └── mod.rs           # LLM actor, BPE token estimator, InferResult
+│   ├── memory/
+│   │   └── mod.rs           # SQLite: conversations, RAG chunks, scheduled tasks
+│   ├── plugins/
+│   │   └── mod.rs           # PluginRegistry, PluginRunner (async, sig-verified)
+│   ├── scheduler/
+│   │   └── mod.rs           # Persistent cron scheduler, next_run_time
+│   ├── security/
+│   │   └── mod.rs           # Ed25519 device identity, plugin verification
+│   └── telegram/
+│       └── mod.rs           # Telegram long-polling bot
+└── tests/
+    └── integration.rs       # 15 integration tests + 7 unit tests
+
+plugins/
+├── Cargo.toml               # Workspace
+├── plugin-calculator.json   # Manifest (runtime reads this)
+├── plugin-datetime.json
+├── plugin-weather.json
+├── plugin-file-reader.json
+├── plugin-calculator/
+│   ├── Cargo.toml
+│   └── src/main.rs
+├── plugin-datetime/
+│   ├── Cargo.toml
+│   └── src/main.rs
+├── plugin-weather/
+│   ├── Cargo.toml
+│   └── src/main.rs
+└── plugin-file-reader/
+    ├── Cargo.toml
+    └── src/main.rs
 ```
 
 ---
@@ -159,16 +197,21 @@ find src -name "*.rs" | sort
 
 Expected output:
 ```
+src/agent/mod.rs
 src/api/chat.rs
 src/api/health.rs
 src/api/mod.rs
 src/api/models.rs
+src/api/scheduler.rs
 src/errors.rs
+src/lib.rs
 src/llm/mod.rs
 src/main.rs
 src/memory/mod.rs
 src/plugins/mod.rs
+src/scheduler/mod.rs
 src/security/mod.rs
+src/telegram/mod.rs
 ```
 
 ---
@@ -229,9 +272,25 @@ When complete you will see:
 Finished `release` profile [optimized] target(s) in XX:XX
 ```
 
-**Install the binary system-wide:**
+**Build plugins:**
 ```bash
-sudo cp target/release/fabio-claw /usr/local/bin/
+cd ~/fabio-claw/plugins
+cargo build --release
+```
+
+**Install the binaries system-wide:**
+```bash
+sudo cp ~/fabio-claw/target/release/fabio-claw /usr/local/bin/
+
+sudo cp ~/fabio-claw/plugins/target/release/plugin-calculator  /opt/fabio-claw/plugins/
+sudo cp ~/fabio-claw/plugins/target/release/plugin-datetime    /opt/fabio-claw/plugins/
+sudo cp ~/fabio-claw/plugins/target/release/plugin-weather     /opt/fabio-claw/plugins/
+sudo cp ~/fabio-claw/plugins/target/release/plugin-file-reader /opt/fabio-claw/plugins/
+
+sudo cp ~/fabio-claw/plugins/plugin-calculator.json   /opt/fabio-claw/plugins/
+sudo cp ~/fabio-claw/plugins/plugin-datetime.json     /opt/fabio-claw/plugins/
+sudo cp ~/fabio-claw/plugins/plugin-weather.json      /opt/fabio-claw/plugins/
+sudo cp ~/fabio-claw/plugins/plugin-file-reader.json  /opt/fabio-claw/plugins/
 ```
 
 ---
@@ -340,7 +399,7 @@ Run these tests in order after installation.
 ```bash
 curl http://localhost:8080/health
 ```
-Expected: `{"status":"ok","version":"0.1.0","device_id":"..."}`
+Expected: `{"status":"ok","version":"0.2.0","device_id":"..."}`
 
 ---
 
@@ -390,7 +449,54 @@ Expected latency:
 
 ---
 
-### Test 6 — Conversation Persistence
+### Test 6 — Plugin Commands
+```bash
+# Calculator
+curl -s -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local","messages":[{"role":"user","content":"/calc 2^10 - 1"}],"max_tokens":50}' \
+  | python3 -m json.tool
+
+# Weather
+curl -s -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local","messages":[{"role":"user","content":"/weather Milan"}],"max_tokens":100}' \
+  | python3 -m json.tool
+
+# DateTime
+curl -s -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"local","messages":[{"role":"user","content":"/datetime"}],"max_tokens":50}' \
+  | python3 -m json.tool
+```
+
+---
+
+### Test 7 — Tool Definitions (for agent/tool-calling clients)
+```bash
+curl http://localhost:8080/v1/tools | python3 -m json.tool
+```
+Expected: JSON object with `"tools"` array, one entry per registered plugin, each containing `tool_schema`.
+
+---
+
+### Test 8 — Scheduled Tasks API
+```bash
+# List tasks
+curl http://localhost:8080/v1/tasks
+
+# Create a task
+curl -X POST http://localhost:8080/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"name":"hourly-weather","cron_expr":"0 0 * * * *","command":"weather","args":"Milan","enabled":true}'
+
+# Delete a task
+curl -X DELETE http://localhost:8080/v1/tasks/hourly-weather
+```
+
+---
+
+### Test 9 — Conversation Persistence
 ```bash
 sqlite3 /var/lib/fabio-claw/memory.db \
   "SELECT datetime(created_at), user_msg, assistant_msg FROM conversations ORDER BY id DESC LIMIT 5;"
@@ -399,7 +505,7 @@ Expected: Your recent conversations saved with timestamps.
 
 ---
 
-### Test 7 — Device Identity
+### Test 10 — Device Identity
 ```bash
 # Check key file permissions (must be 600)
 ls -la /var/lib/fabio-claw/device.key
@@ -411,7 +517,7 @@ Expected: `-rw-------` permissions and a 64-character hex device ID.
 
 ---
 
-### Test 8 — Remote Access from Another Device
+### Test 11 — Remote Access from Another Device
 ```bash
 hostname -I   # find Pi IP
 ```
@@ -423,7 +529,7 @@ Expected: Chat UI loads with green ONLINE dot, model name visible, chat works.
 
 ---
 
-### Test 9 — Survive Reboot
+### Test 12 — Survive Reboot
 ```bash
 sudo reboot
 ```
@@ -448,6 +554,10 @@ All configuration via environment variables (set in the systemd service file):
 | `KEY_PATH` | `/var/lib/fabio-claw/device.key` | Ed25519 private key path |
 | `PLUGIN_DIR` | `/opt/fabio-claw/plugins` | Plugin binary directory |
 | `RUST_LOG` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+| `AGENT_MODE` | `false` | Enable ReAct agent loop |
+| `AGENT_TRACE` | `0` | Append agent step trace to replies |
+| `TELEGRAM_TOKEN` | — | Enable Telegram bot (long-polling) |
+| `TELEGRAM_ALLOWED_CHATS` | — | Comma-separated chat ID allowlist |
 
 ---
 
@@ -473,11 +583,23 @@ OpenAI-compatible chat endpoint.
 ### `GET /v1/models`
 Returns the loaded model name in OpenAI list format.
 
+### `GET /v1/tools`
+Returns all registered plugin tool schemas in OpenAI format (for agent tool-calling clients).
+
 ### `GET /health`
 Returns `status`, `version`, `timestamp`, and `device_id`.
 
 ### `GET /health/ready`
 Returns `ready`, `llm_loaded`, `memory_ok`. Use for load balancer probes.
+
+### `GET /v1/tasks`
+List all scheduled tasks.
+
+### `POST /v1/tasks`
+Create or update a scheduled task.
+
+### `DELETE /v1/tasks/:name`
+Delete a scheduled task by name.
 
 ---
 
@@ -564,6 +686,9 @@ cargo run
 # Run tests
 cargo test
 
+# Run integration tests only
+cargo test --test integration
+
 # Lint
 cargo clippy -- -D warnings
 
@@ -577,7 +702,7 @@ cargo fmt
 
 - **No shared-memory plugins** — plugins run as isolated child processes
 - **No `dlopen`** — no dynamic library loading at runtime
-- **Signed plugin verification** — Ed25519 signatures checked before execution
+- **Signed plugin verification** — Ed25519 signatures checked before execution (opt-in via `require_signature`)
 - **Device-bound cryptographic identity** — unique per device, `0600` file permissions
 - **Hard timeouts** — 60s inference, 10s plugin execution
 - **Backpressure** — bounded queue (32 requests) prevents memory exhaustion
@@ -587,14 +712,9 @@ cargo fmt
 
 ## Plugin System
 
-Plugins are standalone executables communicating via JSON over STDIN/STDOUT:
-
-```
-fabio-claw  →  [JSON request]  →  STDIN  →  plugin binary
-fabio-claw  ←  [JSON response] ←  STDOUT ←  plugin binary
-```
-
-Each plugin must have a `.sig` signature file. Any plugin exceeding 10 seconds is killed.
+Plugins are standalone executables communicating via JSON over STDIN/STDOUT.
+Each manifest can declare a `tool_schema` for OpenAI-style agent tool-calling integration.
+See [ADDING_A_PLUGIN.md](ADDING_A_PLUGIN.md) for a step-by-step guide.
 
 ---
 
