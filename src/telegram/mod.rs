@@ -232,7 +232,7 @@ fn split_message(text: &str, max_len: usize) -> Vec<&str> {
 
 /// Returns a configured `TelegramBot` if `TELEGRAM_TOKEN` is set, otherwise `None`.
 pub fn from_env(api_base: &str) -> Option<Arc<TelegramBot>> {
-    let token = std::env::var("TOKEN").ok()?;
+    let token = std::env::var("TELEGRAM_TOKEN").ok()?;
 
     let allowed_chats: Vec<i64> = std::env::var("TELEGRAM_ALLOWED_CHATS")
         .unwrap_or_default()
