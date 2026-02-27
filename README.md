@@ -1,6 +1,6 @@
 # 🦀 Fabio-Claw
 
-**Fabio-Claw** is an edge-first, embedded LLM runtime built in Rust — designed for serious edge AI deployments on Raspberry Pi 4 and other Linux ARM boards.
+**Fabio-Claw** is an edge-first, embedded LLM runtime built in Rust — designed for serious edge AI deployments on Raspberry Pi and other Linux ARM boards.
 
 > Run private, local AI inference without cloud dependency. OpenAI-compatible API. Near-zero boot time. Production security architecture.
 
@@ -69,15 +69,6 @@ Plugin Sandbox (child process)     ← JSON over STDIN/STDOUT, 10s timeout, sig-
 - **Local RAG in SQLite** — cosine-similarity search over embedded document chunks
 - **Real token accounting** — BPE estimator + actual llama.cpp token counts
 
-### 🔮 Roadmap
-- [ ] Streaming responses (`stream: true`)
-- [ ] Conversation context window management
-- [ ] Linux seccomp sandboxing for plugins
-- [ ] Plugin SDK and signing tool
-- [ ] Metrics endpoint (Prometheus-compatible)
-- [ ] Rate limiting per session
-- [ ] Cloud sync / marketplace signing authority
-
 ---
 
 ## Project Structure
@@ -139,7 +130,7 @@ plugins/
 ## 🍓 Complete Installation Guide — Raspberry Pi 4 from Scratch
 
 ### Hardware Requirements
-- Raspberry Pi 4 with **4GB RAM minimum** (8GB recommended for Mistral 7B)
+- Raspberry Pi minimum** (8GB recommended for Mistral 7B)
 - **32GB+ SD card** or USB SSD
 - Raspberry Pi OS **64-bit** (Bookworm recommended)
 - Internet connection for initial setup only
@@ -238,7 +229,9 @@ Choose a model based on your available RAM:
 | Mistral 7B Q4 | ~4GB | ~5GB | High quality ✅ recommended |
 | Llama 3.2 8B Q4 | ~4.7GB | ~6GB | Best (8GB Pi only) |
 
-**TinyLlama (4GB Pi, fast responses ~5s):**
+⚠️ Due to the Raspberry Pi's limited computational power, please do not expect excellent performance.
+
+**TinyLlama ():**
 ```bash
 wget -O /opt/fabio-claw/models/model.gguf \
   https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
@@ -250,7 +243,7 @@ wget -O /opt/fabio-claw/models/phi-2.Q4_K_M.gguf \
 https://huggingface.co/TheBloke/Phi-2-GGUF/resolve/main/phi-2.Q4_K_M.gguf
 ```
 
-**Mistral 7B (8GB Pi, best quality ~60-120s per response):**
+**Mistral 7B ():**
 ```bash
 wget -O /opt/fabio-claw/models/model.gguf \
   https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf
